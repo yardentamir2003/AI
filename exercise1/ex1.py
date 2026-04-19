@@ -99,6 +99,21 @@ class ElevatorsProblem(search.Problem):
     def h_astar(self, node):
         """ This is the heuristic. It gets a node (not a state)
         and returns a goal distance estimate"""
+        
+        state = node.state
+        elevators, persons = state
+        h = 0
+        
+        for p_id, loc, is_in in persons:
+            goal_floor = self.persons_static[p_id][2]
+            
+            if is_in:
+                # האדם כבר במעלית, הוא חייב לצאת כדי לסיים
+                h += 1
+            elif loc != goal_floor:
+                # האדם בקומה הלא נכונה, הוא חייב להיכנס ולצאת
+                h += 2
+        return h
         utils.raiseNotDefined()
 
 
