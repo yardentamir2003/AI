@@ -25,7 +25,7 @@ class ElevatorsProblem(search.Problem):
         pers_list = []
         for p_id, (f_start, w, f_goal) in initial['Persons'].items():
             # Person starts at his starting floor, outside the elevator
-            pers_list.append((p_id, f_start, False)) # (p_id, current_floor, is_in_elevator) 
+            pers_list.append((p_id, f_start, False)) # (p_id, location(floor\e_id), is_in_elevator) 
             
         # Sort lists in order to get same hash value for all state's permutations
         initial_state = (tuple(sorted(elev_list)), tuple(sorted(pers_list)))
@@ -33,10 +33,51 @@ class ElevatorsProblem(search.Problem):
         
         """ Constructor only needs the initial state.
         Don't forget to set the goal or implement the goal test"""
-        search.Problem.__init__(self, initial)
+        
 
     def successor(self, state):
         """ Generates the successor states returns [(action, achieved_states, ...)]"""
+        
+        # Extract elevators and persons from the state 
+        elevators, persons = state
+        successors = []
+        
+        # 1. MOVE Actions
+        for i, (e_id, e_floor) in enumerate(elevators):
+            reachable_floors = self.elevators_static[e_id][1] # extract F (reachable floors) from static data
+            for target_floor in reachable_floors:
+                if target_floor != e_floor:
+                    new_elevs = list(elevators)
+                    new_elevs[i] = (e_id, target_floor)
+                    action = f"MOVE{{{e_id},{target_floor}}}"
+                    successors.append((action, (tuple(new_elevs), persons)))
+                    
+        # 2. ENTER Actions
+        for i, (e_id, e_floor) in enumerate(elevators):
+            # Calculate currect weight. count person that is inside an elevator and 
+            curr_weight = sum(self.persons_static[p[0]][1] for p in persons if p[2] and p[1] == e_id)
+            max_w = self.elevators_static[e_id][2]
+            
+            for j, (p_id, p_loc, is_in) in enumerate(persons):
+                if not is_in and p_loc == e_floor:
+                    p_weight = self.persons_static[p_id][1]
+                    if curr_weight + p_weight <= max_w: # check person can enter without violating waight constraints
+                        new_persons = list(persons)
+                        new_persons[j] = (p_id, e_id, True)
+                        action = f"ENTER{{{p_id},{e_id}}}"
+                        successors.append((action, (elevators, tuple(new_persons))))
+                        
+        # 3. EXIT Actions
+        for i, (e_id, e_floor) in enumerate(elevators):
+            for j, (p_id, p_loc, is_in) in enumerate(persons):
+                if is_in and p_loc == e_id: # check person is inside elevator and location is e_id
+                    new_persons = list(persons)
+                    new_persons[j] = (p_id, e_floor, False)
+                    action = f"EXIT{{{p_id},{e_id}}}"
+                    successors.append((action, (elevators, tuple(new_persons))))
+                    
+        return successors
+    
         utils.raiseNotDefined()
 
     def goal_test(self, state):
