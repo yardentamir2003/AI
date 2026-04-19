@@ -9,25 +9,42 @@ id = ["No numbers - I'm special!"]
 
 
 class ElevatorsProblem(search.Problem):
-    """This class implements an elevators problem"""
-
     def __init__(self, initial):
+        
         # Save static values inside self and not inside a state
         self.height = initial['height']
         self.elevators_static = initial['Elevators'] # {id: (f, F, w_max)}
         self.persons_static = initial['Persons']     # {id: (f_start, w, f_goal)}
         
-        # Create initial state (tuple of tuples)
+        # Calculate transfer floors (reachable by more than one elevator)
+        # Essential for paths where a person must switch elevators to reach their goal
+        self.transfer_floors = set()
+        all_sets = [set(data[1]) for data in self.elevators_static.values()]
+        for i, s1 in enumerate(all_sets):
+            for j, s2 in enumerate(all_sets):
+                if i != j:
+                    self.transfer_floors.update(s1 & s2)
+
+        # Calculate direct reachability for each person
+        # Check if any single elevator can take a person from their start floor directly to goal floor
+        self.can_reach_goal_direct = {}
+        for p_id, (f_start, w, f_goal) in self.persons_static.items():
+            # Check if there exists an elevator where both start and goal floors are in its reachable set (F)
+            self.can_reach_goal_direct[p_id] = any(
+                f_start in elev_data[1] and f_goal in elev_data[1] 
+                for elev_data in self.elevators_static.values()
+            )
+
+        # State contains only the variables that change during the search
         elev_list = []
         for e_id, (f, F, w_max) in initial['Elevators'].items():
-            elev_list.append((e_id, f)) # (e_id, current_floor)
+            elev_list.append((e_id, f))
             
         pers_list = []
         for p_id, (f_start, w, f_goal) in initial['Persons'].items():
-            # Person starts at his starting floor, outside the elevator
-            pers_list.append((p_id, f_start, False)) # (p_id, location(floor\e_id), is_in_elevator) 
+            pers_list.append((p_id, f_start, False)) 
             
-        # Sort lists in order to get same hash value for all state's permutations
+        # Create initial state    
         initial_state = (tuple(sorted(elev_list)), tuple(sorted(pers_list)))
         search.Problem.__init__(self, initial_state)
         
@@ -36,42 +53,27 @@ class ElevatorsProblem(search.Problem):
         
 
     def successor(self, state):
-        """ Generates the successor states returns [(action, achieved_states, ...)]"""
-        
-        # Extract elevators and persons from the state 
         elevators, persons = state
         successors = []
         
-        # # 1. MOVE Actions
-        # for i, (e_id, e_floor) in enumerate(elevators):
-        #     reachable_floors = self.elevators_static[e_id][1] # extract F (reachable floors) from static data
-        #     for target_floor in reachable_floors:
-        #         if target_floor != e_floor:
-        #             new_elevs = list(elevators)
-        #             new_elevs[i] = (e_id, target_floor)
-        #             action = f"MOVE{{{e_id},{target_floor}}}"
-        #             successors.append((action, (tuple(new_elevs), persons)))
-        
-        # 1. MOVE Actions - Smart Pruning
+        # 3. חישוב משקלים של כל המעליות בבת אחת (O(P) במקום O(E*P))
+        curr_weights = {e_id: 0 for e_id, _ in elevators}
+        for p_id, p_loc, is_in in persons:
+            if is_in:
+                curr_weights[p_loc] += self.persons_static[p_id][1]
+
+        # 1. MOVE Actions
         for i, (e_id, e_floor) in enumerate(elevators):
             reachable_floors = self.elevators_static[e_id][1]
             
-            # קומות "מעניינות" למעלית הזו:
-            # א. קומות יעד של אנשים שנמצאים כרגע בתוך המעלית הזו
-            targets_inside = {self.persons_static[p[0]][2] for p in persons if p[2] and p[1] == e_id}
-            
-            # ב. קומות שבהן מחכים אנשים שהמעלית הזו יכולה לאסוף (והיא לא מלאה)
-            # הערה: לשיפור נוסף אפשר לבדוק כאן אם יש מקום במעלית (curr_weight + weight_min <= max_w)
+            # קומות "מעניינות" באמת
+            targets_inside = {self.persons_static[p[0]][2] for p in persons if p[2] and p[1] == e_id and self.persons_static[p[0]][2] in reachable_floors}
+            needs_transfer = any(p[2] and p[1] == e_id and self.persons_static[p[0]][2] not in reachable_floors for p in persons)
             targets_waiting = {p[1] for p in persons if not p[2] and p[1] in reachable_floors}
-            
-            # ג. קומות "מעבר" (Transfer Floors) - חשוב למקרים שבהם מעלית אחת לא מגיעה ליעד
-            # כדי לפשט, אפשר להוסיף את כל הקומות שמשותפות למעליות אחרות
-            transfer_floors = set()
-            for other_e_id, other_data in self.elevators_static.items():
-                if other_e_id != e_id:
-                    transfer_floors.update(set(reachable_floors) & set(other_data[1]))
 
-            interesting_floors = targets_inside | targets_waiting | transfer_floors
+            interesting_floors = targets_inside | targets_waiting
+            if needs_transfer:
+                interesting_floors.update(self.transfer_floors & set(reachable_floors))
 
             for target_floor in interesting_floors:
                 if target_floor != e_floor:
@@ -82,27 +84,22 @@ class ElevatorsProblem(search.Problem):
                     
         # 2. ENTER Actions
         for i, (e_id, e_floor) in enumerate(elevators):
-            # Calculate currect weight. count person that is inside an elevator and 
-            curr_weight = sum(self.persons_static[p[0]][1] for p in persons if p[2] and p[1] == e_id)
             max_w = self.elevators_static[e_id][2]
-            
+            curr_w = curr_weights[e_id]
             for j, (p_id, p_loc, is_in) in enumerate(persons):
                 if not is_in and p_loc == e_floor:
-                    p_weight = self.persons_static[p_id][1]
-                    if curr_weight + p_weight <= max_w: # check person can enter without violating waight constraints
+                    if curr_w + self.persons_static[p_id][1] <= max_w:
                         new_persons = list(persons)
                         new_persons[j] = (p_id, e_id, True)
-                        action = f"ENTER{{{p_id},{e_id}}}"
-                        successors.append((action, (elevators, tuple(new_persons))))
+                        successors.append((f"ENTER{{{p_id},{e_id}}}", (elevators, tuple(new_persons))))
                         
         # 3. EXIT Actions
         for i, (e_id, e_floor) in enumerate(elevators):
             for j, (p_id, p_loc, is_in) in enumerate(persons):
-                if is_in and p_loc == e_id: # check person is inside elevator and location is e_id
+                if is_in and p_loc == e_id:
                     new_persons = list(persons)
                     new_persons[j] = (p_id, e_floor, False)
-                    action = f"EXIT{{{p_id},{e_id}}}"
-                    successors.append((action, (elevators, tuple(new_persons))))
+                    successors.append((f"EXIT{{{p_id},{e_id}}}", (elevators, tuple(new_persons))))
                     
         return successors
     
@@ -124,55 +121,21 @@ class ElevatorsProblem(search.Problem):
         return True
         utils.raiseNotDefined()
 
-    # def h_astar(self, node):
-    #     """ This is the heuristic. It gets a node (not a state)
-    #     and returns a goal distance estimate"""
-        
-    #     state = node.state
-    #     elevators, persons = state
-    #     h = 0
-        
-    #     for p_id, loc, is_in in persons:
-    #         goal_floor = self.persons_static[p_id][2]
-            
-    #         if is_in:
-    #             # האדם כבר במעלית, הוא חייב לצאת כדי לסיים
-    #             h += 1
-    #         elif loc != goal_floor:
-    #             # האדם בקומה הלא נכונה, הוא חייב להיכנס ולצאת
-    #             h += 2
-    #     return h
     
     def h_astar(self, node):
         state = node.state
-        elevators, persons = state
+        persons = state[1]
         h = 0
-        
         for p_id, loc, is_in in persons:
-            p_data = self.persons_static[p_id]
-            f_start, weight, f_goal = p_data
-            
-            # אם הוא כבר ביעד (ומחוץ למעלית), עלות 0
+            f_goal = self.persons_static[p_id][2]
             if not is_in and loc == f_goal:
                 continue
-                
             if is_in:
-                # אדם בתוך מעלית:
-                e_id = loc
-                reachable_by_current = self.elevators_static[e_id][1]
-                if f_goal in reachable_by_current:
-                    h += 1 # רק EXIT
-                else:
-                    h += 3 # חייב EXIT, אז ENTER למעלית אחרת ו-EXIT (סה"כ 3 פעולות)
+                # האם המעלית הנוכחית מגיעה ליעד?
+                h += 1 if f_goal in self.elevators_static[loc][1] else 3
             else:
-                # אדם מחוץ למעלית בקומה loc:
-                # האם יש מעלית שיכולה לקחת אותו מ-loc ל-f_goal?
-                can_go_direct = any(f_goal in edata[1] and loc in edata[1] 
-                                    for edata in self.elevators_static.values())
-                if can_go_direct:
-                    h += 2 # ENTER + EXIT
-                else:
-                    h += 4 # ENTER, EXIT, ENTER, EXIT (מינימום להחלפת מעלית)
+                # שימוש בחישוב המוקדם מה-init
+                h += 2 if self.can_reach_goal_direct[p_id] else 4
         return h
         utils.raiseNotDefined()
 
