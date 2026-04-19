@@ -44,7 +44,9 @@ class ElevatorsProblem(search.Problem):
         for p_id, (f_start, w, f_goal) in initial['Persons'].items():
             pers_list.append((p_id, f_start, False)) 
             
-        # Create initial state    
+        # Create initial state 
+        # Sort lists in order to get same hash value for all state's permutations,
+        # preventing the search from visiting redundant permutations   
         initial_state = (tuple(sorted(elev_list)), tuple(sorted(pers_list)))
         search.Problem.__init__(self, initial_state)
         
@@ -56,25 +58,31 @@ class ElevatorsProblem(search.Problem):
         elevators, persons = state
         successors = []
         
-        # 3. חישוב משקלים של כל המעליות בבת אחת (O(P) במקום O(E*P))
+        # Calculate current weights for all elevators (avoid redundant calculations in the main loops)
         curr_weights = {e_id: 0 for e_id, _ in elevators}
         for p_id, p_loc, is_in in persons:
             if is_in:
                 curr_weights[p_loc] += self.persons_static[p_id][1]
 
-        # 1. MOVE Actions
+        # MOVE Actions
         for i, (e_id, e_floor) in enumerate(elevators):
             reachable_floors = self.elevators_static[e_id][1]
             
-            # קומות "מעניינות" באמת
+            # Identify "interesting floors" in order to prune useless moves
+            
+            # a) Destinations of people currently inside this elevator
             targets_inside = {self.persons_static[p[0]][2] for p in persons if p[2] and p[1] == e_id and self.persons_static[p[0]][2] in reachable_floors}
-            needs_transfer = any(p[2] and p[1] == e_id and self.persons_static[p[0]][2] not in reachable_floors for p in persons)
+            # b) Floors where people are waiting to be picked up            
             targets_waiting = {p[1] for p in persons if not p[2] and p[1] in reachable_floors}
-
+            # c) Check if someone inside must switch elevators
+            needs_transfer = any(p[2] and p[1] == e_id and self.persons_static[p[0]][2] not in reachable_floors for p in persons)
+           
+            # If a transfer is needed, add pre-calculated meeting points
             interesting_floors = targets_inside | targets_waiting
             if needs_transfer:
                 interesting_floors.update(self.transfer_floors & set(reachable_floors))
 
+            # Generate move actions only to "interesting destinations"
             for target_floor in interesting_floors:
                 if target_floor != e_floor:
                     new_elevs = list(elevators)
@@ -82,22 +90,26 @@ class ElevatorsProblem(search.Problem):
                     action = f"MOVE{{{e_id},{target_floor}}}"
                     successors.append((action, (tuple(new_elevs), persons)))
                     
-        # 2. ENTER Actions
+        # ENTER Actions
         for i, (e_id, e_floor) in enumerate(elevators):
             max_w = self.elevators_static[e_id][2]
             curr_w = curr_weights[e_id]
             for j, (p_id, p_loc, is_in) in enumerate(persons):
+                # Person can enter if they are at the same floor and outside
                 if not is_in and p_loc == e_floor:
+                    # Capacity check
                     if curr_w + self.persons_static[p_id][1] <= max_w:
                         new_persons = list(persons)
                         new_persons[j] = (p_id, e_id, True)
                         successors.append((f"ENTER{{{p_id},{e_id}}}", (elevators, tuple(new_persons))))
                         
-        # 3. EXIT Actions
+        # EXIT Actions
         for i, (e_id, e_floor) in enumerate(elevators):
             for j, (p_id, p_loc, is_in) in enumerate(persons):
+                # Person can exit only if they are inside currently in this elevator
                 if is_in and p_loc == e_id:
                     new_persons = list(persons)
+                    # Update person, location becomes current floor, is_in becomes False
                     new_persons[j] = (p_id, e_floor, False)
                     successors.append((f"EXIT{{{p_id},{e_id}}}", (elevators, tuple(new_persons))))
                     
@@ -123,20 +135,39 @@ class ElevatorsProblem(search.Problem):
 
     
     def h_astar(self, node):
+        # A* Estimates the minimum number of actions required for all people to reach their destinations
+        # The estimate is based on the minimum required ENTER and EXIT actions
         state = node.state
         persons = state[1]
         h = 0
+        
         for p_id, loc, is_in in persons:
             f_goal = self.persons_static[p_id][2]
+            
+            # Case 0: Person is already at their goal floor and outside the elevator, Cost = 0
             if not is_in and loc == f_goal:
                 continue
+                
             if is_in:
-                # האם המעלית הנוכחית מגיעה ליעד?
-                h += 1 if f_goal in self.elevators_static[loc][1] else 3
+                # Case 1: Person is inside an elevator. Check if this elevator can reach person's goal floor
+                if f_goal in self.elevators_static[loc][1]:
+                    # Minimum 1 action required: EXIT at the goal floor
+                    h += 1 
+                else:
+                    # Minimum 3 actions required: EXIT + ENTER + EXIT
+                    h += 3 
             else:
-                # שימוש בחישוב המוקדם מה-init
-                h += 2 if self.can_reach_goal_direct[p_id] else 4
+                # Case 2: Person is outside an elevator. Check if any elevator can take them directly to goal
+                if self.can_reach_goal_direct[p_id]:
+                    # Minimum 2 actions required: ENTER + EXIT
+                    h += 2 
+                else:
+                    # Minimum 4 actions required: ENTER + EXIT + ENTER + EXIT
+                    h += 4
+                    
         return h
+        
+        
         utils.raiseNotDefined()
 
 
