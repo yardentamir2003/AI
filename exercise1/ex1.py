@@ -90,12 +90,11 @@ class ElevatorsProblem(search.Problem):
         #             action = f"MOVE{{{e_id},{target_floor}}}"
         #             successors.append((action, (tuple(new_elevs), persons)))
         
-        # Pruning improvment from 9 to 7 seconds (change remarks!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!)
-        # 1. MOVE Actions
+        
+        # 1. MOVE Actions (with pruning)
         for i, (e_id, e_floor) in enumerate(elevators):
+            # Identify "interesting floors" in order to prune useless moves
             reachable_floors = self.elevators_static[e_id][1]
-            
-            # --- New Weight-Based Pruning Logic ---
             max_w = self.elevators_static[e_id][2]
             curr_w = curr_weights[e_id]
             remaining_cap = max_w - curr_w
@@ -120,7 +119,6 @@ class ElevatorsProblem(search.Problem):
             interesting_floors = targets_inside | targets_waiting
             if needs_transfer:
                 interesting_floors.update(self.transfer_floors & set(reachable_floors))
-            # ---------------------------------------
 
             for target_floor in interesting_floors:
                 if target_floor != e_floor:
