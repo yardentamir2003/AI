@@ -64,25 +64,64 @@ class ElevatorsProblem(search.Problem):
             if is_in:
                 curr_weights[p_loc] += self.persons_static[p_id][1]
 
-        # MOVE Actions
+        # # MOVE Actions
+        # for i, (e_id, e_floor) in enumerate(elevators):
+        #     reachable_floors = self.elevators_static[e_id][1]
+            
+        #     # Identify "interesting floors" in order to prune useless moves
+            
+        #     # a) Destinations of people currently inside this elevator
+        #     targets_inside = {self.persons_static[p[0]][2] for p in persons if p[2] and p[1] == e_id and self.persons_static[p[0]][2] in reachable_floors}
+        #     # b) Floors where people are waiting to be picked up            
+        #     targets_waiting = {p[1] for p in persons if not p[2] and p[1] in reachable_floors}
+        #     # c) Check if someone inside must switch elevators
+        #     needs_transfer = any(p[2] and p[1] == e_id and self.persons_static[p[0]][2] not in reachable_floors for p in persons)
+           
+        #     # If a transfer is needed, add pre-calculated meeting points
+        #     interesting_floors = targets_inside | targets_waiting
+        #     if needs_transfer:
+        #         interesting_floors.update(self.transfer_floors & set(reachable_floors))
+
+        #     # Generate move actions only to "interesting destinations"
+        #     for target_floor in interesting_floors:
+        #         if target_floor != e_floor:
+        #             new_elevs = list(elevators)
+        #             new_elevs[i] = (e_id, target_floor)
+        #             action = f"MOVE{{{e_id},{target_floor}}}"
+        #             successors.append((action, (tuple(new_elevs), persons)))
+        
+        # Pruning improvment from 9 to 7 seconds (change remarks!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!)
+        # 1. MOVE Actions
         for i, (e_id, e_floor) in enumerate(elevators):
             reachable_floors = self.elevators_static[e_id][1]
             
-            # Identify "interesting floors" in order to prune useless moves
-            
+            # --- New Weight-Based Pruning Logic ---
+            max_w = self.elevators_static[e_id][2]
+            curr_w = curr_weights[e_id]
+            remaining_cap = max_w - curr_w
+
             # a) Destinations of people currently inside this elevator
-            targets_inside = {self.persons_static[p[0]][2] for p in persons if p[2] and p[1] == e_id and self.persons_static[p[0]][2] in reachable_floors}
-            # b) Floors where people are waiting to be picked up            
-            targets_waiting = {p[1] for p in persons if not p[2] and p[1] in reachable_floors}
+            targets_inside = {self.persons_static[p[0]][2] for p in persons 
+                              if p[2] and p[1] == e_id and self.persons_static[p[0]][2] in reachable_floors}
+            
+            # b) Floors where people are waiting AND can actually fit in the elevator
+            targets_waiting = set()
+            for p_id, p_loc, is_in in persons:
+                if not is_in and p_loc in reachable_floors:
+                    # Check if this specific person's weight fits in the remaining capacity
+                    if self.persons_static[p_id][1] <= remaining_cap:
+                        targets_waiting.add(p_loc)
+
             # c) Check if someone inside must switch elevators
-            needs_transfer = any(p[2] and p[1] == e_id and self.persons_static[p[0]][2] not in reachable_floors for p in persons)
-           
-            # If a transfer is needed, add pre-calculated meeting points
+            needs_transfer = any(p[2] and p[1] == e_id and self.persons_static[p[0]][2] not in reachable_floors 
+                                 for p in persons)
+            
+            # Combine all interesting floors
             interesting_floors = targets_inside | targets_waiting
             if needs_transfer:
                 interesting_floors.update(self.transfer_floors & set(reachable_floors))
+            # ---------------------------------------
 
-            # Generate move actions only to "interesting destinations"
             for target_floor in interesting_floors:
                 if target_floor != e_floor:
                     new_elevs = list(elevators)
