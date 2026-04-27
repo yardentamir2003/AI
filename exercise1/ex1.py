@@ -61,35 +61,9 @@ class ElevatorsProblem(search.Problem):
         for p_id, p_loc, is_in in persons:
             if is_in:
                 curr_weights[p_loc] += self.persons_static[p_id][1]
-
-        # # MOVE Actions
-        # for i, (e_id, e_floor) in enumerate(elevators):
-        #     reachable_floors = self.elevators_static[e_id][1]
-            
-        #     # Identify "interesting floors" in order to prune useless moves
-            
-        #     # a) Destinations of people currently inside this elevator
-        #     targets_inside = {self.persons_static[p[0]][2] for p in persons if p[2] and p[1] == e_id and self.persons_static[p[0]][2] in reachable_floors}
-        #     # b) Floors where people are waiting to be picked up            
-        #     targets_waiting = {p[1] for p in persons if not p[2] and p[1] in reachable_floors}
-        #     # c) Check if someone inside must switch elevators
-        #     needs_transfer = any(p[2] and p[1] == e_id and self.persons_static[p[0]][2] not in reachable_floors for p in persons)
-           
-        #     # If a transfer is needed, add pre-calculated meeting points
-        #     interesting_floors = targets_inside | targets_waiting
-        #     if needs_transfer:
-        #         interesting_floors.update(self.transfer_floors & set(reachable_floors))
-
-        #     # Generate move actions only to "interesting destinations"
-        #     for target_floor in interesting_floors:
-        #         if target_floor != e_floor:
-        #             new_elevs = list(elevators)
-        #             new_elevs[i] = (e_id, target_floor)
-        #             action = f"MOVE{{{e_id},{target_floor}}}"
-        #             successors.append((action, (tuple(new_elevs), persons)))
         
         
-        # 1. MOVE Actions (with pruning)
+        # MOVE Actions (with pruning)
         for i, (e_id, e_floor) in enumerate(elevators):
             # Identify "interesting floors" in order to prune useless moves
             reachable_floors = self.elevators_static[e_id][1]
@@ -101,7 +75,7 @@ class ElevatorsProblem(search.Problem):
             targets_inside = {self.persons_static[p[0]][2] for p in persons 
                               if p[2] and p[1] == e_id and self.persons_static[p[0]][2] in reachable_floors}
             
-            # b) Floors where people are waiting AND can actually fit in the elevator
+            # b) Floors where people are waiting and can actually fit in the elevator
             targets_waiting = set()
             for p_id, p_loc, is_in in persons:
                 if not is_in and p_loc in reachable_floors:
