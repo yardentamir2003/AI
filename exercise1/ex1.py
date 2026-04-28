@@ -4,7 +4,11 @@ import utils
 
 id = ["No numbers - I'm special!"]
 
-
+# This assignment was completed with the assistance of gemini and claude.
+# The LLMs helped me to develop an admissible h_astar heuristic that accounts for 
+# essential EXIT and ENTER actions to ensure an optimal solution.
+# Moreover, it helped implementing the interesting floors logic within the 
+# successor function in order to prune redundant MOVE actions and improve performance.
 
 class ElevatorsProblem(search.Problem):
     def __init__(self, initial):
