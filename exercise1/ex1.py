@@ -26,16 +26,14 @@ class ElevatorsProblem(search.Problem):
             for j, s2 in enumerate(all_sets):
                 if i != j:
                     self.transfer_floors.update(s1 & s2)
-
-        # Calculate direct reachability for each person
-        # Check if any single elevator can take a person from their start floor directly to goal floor
-        self.can_reach_goal_direct = {}
-        for p_id, (f_start, w, f_goal) in self.persons_static.items():
-            # Check if there exists an elevator where both start and goal floors are in its reachable set (F)
-            self.can_reach_goal_direct[p_id] = any(
-                f_start in elev_data[1] and f_goal in elev_data[1] 
-                for elev_data in self.elevators_static.values()
-            )
+         
+        # Map which floor pairs are connected by any elevator
+        self.direct_connections = set()
+        for e_id, (f, F, w_max) in self.elevators_static.items():
+            for f1 in F:
+                for f2 in F:
+                    # If an elevator can reach both f1 and f2, they are directly connected
+                    self.direct_connections.add((f1, f2))
 
         # State contains only the variables that change during the search
         elev_list = []
@@ -66,36 +64,41 @@ class ElevatorsProblem(search.Problem):
             if is_in:
                 curr_weights[p_loc] += self.persons_static[p_id][1]
         
-        
-        # MOVE Actions (with pruning)
+        # 1. MOVE Actions
         for i, (e_id, e_floor) in enumerate(elevators):
-            # Identify "interesting floors" in order to prune useless moves
             reachable_floors = self.elevators_static[e_id][1]
-            max_w = self.elevators_static[e_id][2]
-            curr_w = curr_weights[e_id]
-            remaining_cap = max_w - curr_w
-
-            # a) Destinations of people currently inside this elevator
-            targets_inside = {self.persons_static[p[0]][2] for p in persons 
-                              if p[2] and p[1] == e_id and self.persons_static[p[0]][2] in reachable_floors}
             
-            # b) Floors where people are waiting and can actually fit in the elevator
+            # Pruning Logic - find interesting floors
+            max_w = self.elevators_static[e_id][2]
+            remaining_cap = max_w - curr_weights[e_id]
+            
+            targets_inside = set()
+            needs_transfer = False
+            
+            for p_id, p_loc, is_in in persons:
+                # If person is in this elevator
+                if is_in and p_loc == e_id:
+                    p_goal = self.persons_static[p_id][2]
+                    if p_goal in reachable_floors:
+                        # a) This elevator can take them directly to their goal
+                        targets_inside.add(p_goal)
+                    else:
+                        # b) This elevator cannot reach their goal (must transfer)
+                        needs_transfer = True
+
+            # If anyone inside needs a transfer, all reachable transfer floors become "interesting"
+            if needs_transfer:
+                targets_inside.update(self.transfer_floors & set(reachable_floors))
+            
+            # c) Pick-up floors: Only floors where someone is waiting and fits in the elevator
             targets_waiting = set()
             for p_id, p_loc, is_in in persons:
                 if not is_in and p_loc in reachable_floors:
-                    # Check if this specific person's weight fits in the remaining capacity
                     if self.persons_static[p_id][1] <= remaining_cap:
                         targets_waiting.add(p_loc)
 
-            # c) Check if someone inside must switch elevators
-            needs_transfer = any(p[2] and p[1] == e_id and self.persons_static[p[0]][2] not in reachable_floors 
-                                 for p in persons)
-            
-            # Combine all interesting floors
             interesting_floors = targets_inside | targets_waiting
-            if needs_transfer:
-                interesting_floors.update(self.transfer_floors & set(reachable_floors))
-
+            
             for target_floor in interesting_floors:
                 if target_floor != e_floor:
                     new_elevs = list(elevators)
@@ -148,36 +151,26 @@ class ElevatorsProblem(search.Problem):
 
     
     def h_astar(self, node):
-        # A* Estimates the minimum number of actions required for all people to reach their destinations
-        # The estimate is based on the minimum required ENTER and EXIT actions
         state = node.state
         persons = state[1]
         h = 0
-        
         for p_id, loc, is_in in persons:
             f_goal = self.persons_static[p_id][2]
-            
-            # Case 0: Person is already at their goal floor and outside the elevator, Cost = 0
             if not is_in and loc == f_goal:
                 continue
-                
+            
             if is_in:
-                # Case 1: Person is inside an elevator. Check if this elevator can reach person's goal floor
+                # Location is elevator_id. Check if this elevator reaches f_goal
                 if f_goal in self.elevators_static[loc][1]:
-                    # Minimum 1 action required: EXIT at the goal floor
                     h += 1 
                 else:
-                    # Minimum 3 actions required: EXIT + ENTER + EXIT
-                    h += 3 
+                    h += 3 # EXIT + ENTER + EXIT
             else:
-                # Case 2: Person is outside an elevator. Check if any elevator can take them directly to goal
-                if self.can_reach_goal_direct[p_id]:
-                    # Minimum 2 actions required: ENTER + EXIT
-                    h += 2 
+                # Location is current floor. Check if any elevator connects current floor to f_goal
+                if (loc, f_goal) in self.direct_connections:
+                    h += 2 # ENTER + EXIT
                 else:
-                    # Minimum 4 actions required: ENTER + EXIT + ENTER + EXIT
-                    h += 4
-                    
+                    h += 4 # ENTER + EXIT + ENTER + EXIT
         return h
         
         
