@@ -399,7 +399,7 @@ class Controller:
                     p_loc = loc[1]
                     if (p_loc, f_goal) in self.helpful_pickups[eid] and self.person_weights[pid] <= remaining_cap and p_loc in reachable:
                         interesting_floors.add(p_loc)
-                                
+                            
             for f in interesting_floors:
                 if f != e_floor: actions.append(f"MOVE{{{eid},{f}}}")
 
@@ -412,6 +412,10 @@ class Controller:
                     if e_floor in self.best_dropoffs[eid].get(f_goal, set()) or e_floor == f_goal:
                         actions.append(f"EXIT{{{pid},{eid}}}")
 
+        # fallback אם ה-pruning הוציא רשימה ריקה
+        if not actions:
+            actions = self.generate_all_legal_actions(state)
+        
         return actions
 
     def _find_elevator(self, elevators, e_id):
@@ -423,3 +427,23 @@ class Controller:
         for i, (pid, loc) in enumerate(persons):
             if pid == p_id: return i, loc
         return None
+    
+    def generate_all_legal_actions(self, state):
+        elevators, persons, _ = state
+        actions = []
+        
+        for eid, e_floor, cur_w in elevators:
+            # כל מהלכי MOVE חוקיים
+            for f in self.reachable[eid]:
+                if f != e_floor:
+                    actions.append(f"MOVE{{{eid},{f}}}")
+            
+            # כל פעולות ENTER ו-EXIT חוקיות
+            for pid, loc in persons:
+                if isinstance(loc, tuple) and loc[0] == 'floor' and loc[1] == e_floor:
+                    if cur_w + self.person_weights[pid] <= self.capacities[eid]:
+                        actions.append(f"ENTER{{{pid},{eid}}}")
+                elif isinstance(loc, tuple) and loc[0] == 'in' and loc[1] == eid:
+                    actions.append(f"EXIT{{{pid},{eid}}}")
+        
+        return actions
