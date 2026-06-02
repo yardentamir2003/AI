@@ -1,15 +1,16 @@
 import ext_elev
 import re
 import heapq
+import time
 
 # ID: 000000000
 # 
 # AI Usage Disclosure:
 # In this assignment, I used Gemini to help model the problem as an MDP.
-# Specifically, the LLM assisted in designing the Depth-2 Expectimax lookahead tree,
-# and implementing the "Farm vs. Goal" split-heuristic (max(v_all, v_profitable)) to handle the _rl traps.
-# Finally, it helped implement an exact Dijkstra-based All-Pairs Shortest Path (APSP) heuristic 
-# that correctly penalizes broken elevators by computing expected actions (1/P_success).
+# Specifically, the LLM assisted in designing a Hybrid Strategy:
+# 1. A Depth-2 Expectimax lookahead tree with a "Farm vs. Goal" split-heuristic to perfectly handle the _rl traps.
+# 2. An embedded Real-Time A* Search for standard maps that acts deterministically 
+#    but uses exact expected costs (1/P_success) derived from a Dijkstra-based APSP to aggressively complete the level.
 
 class Controller:
     def __init__(self, game: ext_elev.GameAPI):
@@ -35,7 +36,12 @@ class Controller:
             
         self.elevator_probs = {eid: self.game.get_elevator_action_prob(eid) for eid in self.reachable}
 
-        # 1. Deterministic APSP (for Action Pruning)
+        # --- זיהוי אוטומטי של מלכודות RL ---
+        max_r = max(self.expected_rewards.values()) if self.expected_rewards else 0
+        self.is_rl_trap = max_r > 40
+        self.step_penalty = 1.15 if self.is_rl_trap else 1.0
+
+        # 1. Deterministic APSP
         all_floors = set()
         for F in self.reachable.values():
             all_floors.update(F)
@@ -70,7 +76,6 @@ class Controller:
                     
                     rides_from_start = self.min_elevators[p_loc][p_goal]
                     valid_dropoffs = set()
-                    
                     for drop_f in F:
                         if p_goal in self.min_elevators.get(drop_f, {}):
                             rides_from_drop = self.min_elevators[drop_f][p_goal]
@@ -83,18 +88,16 @@ class Controller:
                             self.best_dropoffs[eid][p_goal] = set()
                         self.best_dropoffs[eid][p_goal].update(valid_dropoffs)
 
-        # 2. Stochastic APSP (Dijkstra) for Exact Expected Heuristic
+        # 2. Stochastic APSP (Dijkstra)
         self.sp_cost = {}
         for pid in self.person_goals:
             f_goal = self.person_goals[pid]
             p_person = self.person_probs[pid]
             
             adj = { 'Goal': [] }
-            for f in all_floors:
-                adj[('floor', f)] = []
+            for f in all_floors: adj[('floor', f)] = []
             for eid, F in self.reachable.items():
-                for f in F:
-                    adj[('in', eid, f)] = []
+                for f in F: adj[('in', eid, f)] = []
                     
             for eid, F in self.reachable.items():
                 if f_goal in F:
@@ -121,38 +124,156 @@ class Controller:
                         heapq.heappush(pq, (dist[v], v))
             self.sp_cost[pid] = dist
                         
-        self.step_penalty = 1.15 #The 'Magic Number' that balances goal-pursuit and rl-farming
         self.eval_cache = {}
         self.v_initial = self.evaluate_state(self.initial_state)
 
     def choose_next_action(self, state):
-            self.eval_cache = {} 
+        # מנתב: במלכודות מריץ Expectimax, במפות רגילות מריץ A* מותאם הסתברויות
+        if self.is_rl_trap:
+            return self.run_expectimax(state)
+        else:
+            return self.run_astar(state)
+
+    # =========================================================================
+    # HYBRID ENGINE 1: Real-Time A* Search for Normal Maps
+    # =========================================================================
+    def run_astar(self, start_state):
+        start_t = time.time()
+        pq = []
+        counter = 0
+        
+        # מרחיב את הקודקוד הראשון (שורש)
+        for a in self.generate_pruned_actions(start_state):
+            succ = self.simulate_deterministic(start_state, a)
+            cost = self.get_action_expected_cost(a)
+            f = cost + self.heuristic_astar(succ)
+            heapq.heappush(pq, (f, counter, cost, succ, a))
+            counter += 1
             
-            # heuristic: if problem is small (easy), use faster, simpler greedy search.
-            # if problem is hard (large), use the deep 2-step stochastic lookahead.
-            elevators, persons, _ = state
-            is_hard = len(persons) > 3 or len(elevators) > 2
+        visited = {start_state: 0.0}
+        best_action = "RESET"
+        best_f = float('inf')
+        expansions = 0
+        
+        while pq:
+            # מגבלת זמן בטוחה מאוד כדי לא לחטוף Timeout (הקצבנו 2 שניות לצעד)
+            if expansions > 3000 or time.time() - start_t > 2.0:
+                break
+                
+            f, _, g, s, first_a = heapq.heappop(pq)
             
-            best_action = "RESET"
-            # Adjusted penalty: slightly lower (0.9) encourages more activity.
-            max_ev = self.v_initial - 0.9 
+            if s[2] == 0: # מצאנו את הדרך המהירה ביותר ליעד!
+                return first_a
+                
+            if s in visited and visited[s] <= g:
+                continue
+            visited[s] = g
             
-            legal_actions = self.generate_pruned_actions(state)
+            if f < best_f:
+                best_f = f
+                best_action = first_a
+                
+            for a in self.generate_pruned_actions(s):
+                succ = self.simulate_deterministic(s, a)
+                cost = self.get_action_expected_cost(a)
+                nxt_g = g + cost
+                if succ not in visited or nxt_g < visited[succ]:
+                    nxt_f = nxt_g + self.heuristic_astar(succ)
+                    heapq.heappush(pq, (nxt_f, counter, nxt_g, succ, first_a))
+                    counter += 1
             
-            # If 'hard', we use depth 2, otherwise depth 1 to keep it stable
-            target_depth = 2 if is_hard else 1
+            expansions += 1
             
-            for action in legal_actions:
-                ev = self.get_action_ev(state, action, depth=target_depth)
-                if ev > max_ev:
-                    max_ev = ev
-                    best_action = action
-                    
-            return best_action
+        return best_action if best_action else "RESET"
+
+    def simulate_deterministic(self, state, action_str):
+        """ מריץ את הפעולה בהנחת 100% הצלחה לטובת חיפוש ה-A* """
+        elevators_t, persons_t, rem = state
+        m = re.fullmatch(r"\s*(MOVE|ENTER|EXIT)\s*\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}\s*", action_str)
+        name = m.group(1)
+        arg1, arg2 = int(m.group(2)), int(m.group(3))
+        
+        if name == "MOVE":
+            eid, target_f = arg1, arg2
+            e_idx, cur_f, cur_w = self._find_elevator(elevators_t, eid)
+            succ_elevs = list(elevators_t)
+            succ_elevs[e_idx] = (eid, target_f, cur_w)
+            return (tuple(sorted(succ_elevs)), persons_t, rem)
+            
+        elif name == "ENTER":
+            pid, eid = arg1, arg2
+            p_idx, _ = self._find_person(persons_t, pid)
+            e_idx, cur_f, cur_w = self._find_elevator(elevators_t, eid)
+            succ_elevs = list(elevators_t)
+            succ_persons = list(persons_t)
+            succ_elevs[e_idx] = (eid, cur_f, cur_w + self.person_weights[pid])
+            succ_persons[p_idx] = (pid, ('in', eid))
+            return (tuple(sorted(succ_elevs)), tuple(sorted(succ_persons)), rem)
+            
+        elif name == "EXIT":
+            pid, eid = arg1, arg2
+            p_idx, _ = self._find_person(persons_t, pid)
+            e_idx, cur_f, cur_w = self._find_elevator(elevators_t, eid)
+            if cur_f == self.person_goals[pid]:
+                new_persons = tuple(sorted((p, loc) for p, loc in persons_t if p != pid))
+                succ_elevs = list(elevators_t)
+                succ_elevs[e_idx] = (eid, cur_f, cur_w - self.person_weights[pid])
+                return (tuple(sorted(succ_elevs)), new_persons, rem - 1)
+            else:
+                succ_elevs = list(elevators_t)
+                succ_persons = list(persons_t)
+                succ_elevs[e_idx] = (eid, cur_f, cur_w - self.person_weights[pid])
+                succ_persons[p_idx] = (pid, ('floor', cur_f))
+                return (tuple(sorted(succ_elevs)), tuple(sorted(succ_persons)), rem)
+
+    def get_action_expected_cost(self, action_str):
+        if "MOVE" in action_str:
+            eid = int(re.search(r"\{(-?\d+),", action_str).group(1))
+            return 1.0 / self.elevator_probs[eid]
+        else:
+            pid = int(re.search(r"\{(-?\d+),", action_str).group(1))
+            return 1.0 / self.person_probs[pid]
+
+    def heuristic_astar(self, state):
+        elevators, persons, rem = state
+        if rem == 0: return 0.0
+        h = 0.0
+        e_floors = {eid: f for eid, f, _ in elevators}
+        for pid, loc in persons:
+            if isinstance(loc, tuple) and loc[0] == 'in':
+                eid = loc[1]
+                h += self.sp_cost[pid].get(('in', eid, e_floors[eid]), float('inf'))
+            else:
+                f_loc = loc[1]
+                best_c = float('inf')
+                for eid, e_f in e_floors.items():
+                    if f_loc in self.reachable[eid]:
+                        move_c = 0.0 if e_f == f_loc else (1.0 / self.elevator_probs[eid])
+                        enter_c = 1.0 / self.person_probs[pid]
+                        journey_c = self.sp_cost[pid].get(('in', eid, f_loc), float('inf'))
+                        best_c = min(best_c, move_c + enter_c + journey_c)
+                h += best_c
+        return h
+
+    # =========================================================================
+    # HYBRID ENGINE 2: Expectimax for RL Traps
+    # =========================================================================
+    def run_expectimax(self, state):
+        self.eval_cache = {} 
+        best_action = "RESET"
+        max_ev = self.v_initial - 1.0 
+        
+        legal_actions = self.generate_pruned_actions(state)
+        for action in legal_actions:
+            ev = self.get_action_ev(state, action, depth=2)
+            if ev > max_ev:
+                max_ev = ev
+                best_action = action
+        return best_action
         
     def get_state_ev(self, state, depth):
         actions = self.generate_pruned_actions(state)
-        max_ev = self.v_initial 
+        max_ev = self.v_initial - 1.0 
         for a in actions:
             ev = self.get_action_ev(state, a, depth)
             if ev > max_ev: max_ev = ev
@@ -164,10 +285,7 @@ class Controller:
         arg1, arg2 = int(m.group(2)), int(m.group(3))
         
         elevators_t, persons_t, total_remaining = state
-        
-        def value_of(s):
-            if depth <= 1: return self.evaluate_state(s)
-            else: return self.get_state_ev(s, depth - 1)
+        def value_of(s): return self.evaluate_state(s) if depth <= 1 else self.get_state_ev(s, depth - 1)
 
         if name == "MOVE":
             eid, target_f = arg1, arg2
@@ -177,8 +295,9 @@ class Controller:
             succ_elevs = list(elevators_t)
             succ_elevs[e_idx] = (eid, target_f, cur_w)
             v_succ = value_of((tuple(sorted(succ_elevs)), persons_t, total_remaining))
-            
+                        
             options = sorted({cur_f} | (set(self.reachable[eid]) - {target_f}))
+            
             v_fail_sum = 0
             for f_opt in options:
                 fail_elevs = list(elevators_t)
@@ -186,7 +305,7 @@ class Controller:
                 v_fail_sum += value_of((tuple(sorted(fail_elevs)), persons_t, total_remaining))
             v_fail = v_fail_sum / len(options)
             
-            return p_succ * v_succ + (1 - p_succ) * v_fail
+            return p_succ * v_succ + (1 - p_succ) * v_fail - 1.0
 
         elif name == "ENTER":
             pid, eid = arg1, arg2
@@ -200,8 +319,7 @@ class Controller:
             succ_persons[p_idx] = (pid, ('in', eid))
             v_succ = value_of((tuple(sorted(succ_elevs)), tuple(sorted(succ_persons)), total_remaining))
             
-            v_fail = value_of(state)
-            return p_succ * v_succ + (1 - p_succ) * v_fail
+            return p_succ * v_succ + (1 - p_succ) * value_of(state) - 1.0
 
         elif name == "EXIT":
             pid, eid = arg1, arg2
@@ -227,29 +345,7 @@ class Controller:
                 succ_persons[p_idx] = (pid, ('floor', cur_f))
                 v_succ = value_of((tuple(sorted(succ_elevs)), tuple(sorted(succ_persons)), total_remaining))
                 
-            v_fail = value_of(state)
-            return p_succ * v_succ + (1 - p_succ) * v_fail
-
-    def get_person_cost(self, pid, loc, e_floors):
-        if isinstance(loc, tuple) and loc[0] == 'in':
-            eid = loc[1]
-            e_f = e_floors[eid]
-            return self.sp_cost[pid][('in', eid, e_f)]
-        else:
-            f_loc = loc[1]
-            if self.person_goals[pid] == f_loc: return 0.0
-            
-            best_cost = float('inf')
-            for eid, e_f in e_floors.items():
-                if f_loc in self.reachable[eid]:
-                    move_cost = 0.0 if e_f == f_loc else (1.0 / self.elevator_probs[eid])
-                    enter_cost = 1.0 / self.person_probs[pid]
-                    journey_cost = self.sp_cost[pid].get(('in', eid, f_loc), float('inf'))
-                    
-                    total = move_cost + enter_cost + journey_cost
-                    if total < best_cost:
-                        best_cost = total
-            return best_cost
+            return p_succ * v_succ + (1 - p_succ) * value_of(state) - 1.0
 
     def evaluate_state(self, state):
         if state in self.eval_cache: return self.eval_cache[state]
@@ -261,18 +357,26 @@ class Controller:
 
         for pid, loc in persons:
             e_reward = self.expected_rewards[pid]
-            expected_steps = self.get_person_cost(pid, loc, e_floors)
-            
+            if isinstance(loc, tuple) and loc[0] == 'in':
+                expected_steps = self.sp_cost[pid].get(('in', loc[1], e_floors[loc[1]]), float('inf'))
+            else:
+                f_loc = loc[1]
+                expected_steps = 0.0 if self.person_goals[pid] == f_loc else float('inf')
+                if expected_steps == float('inf'):
+                    for eid, e_f in e_floors.items():
+                        if f_loc in self.reachable[eid]:
+                            c = (0.0 if e_f == f_loc else 1.0/self.elevator_probs[eid]) + 1.0/self.person_probs[pid] + self.sp_cost[pid].get(('in', eid, f_loc), float('inf'))
+                            expected_steps = min(expected_steps, c)
+                            
             if expected_steps != float('inf'):
                 person_val = e_reward - (self.step_penalty * expected_steps)
                 v_all += person_val
-                if person_val > 0:
-                    v_profitable += person_val
+                if person_val > 0: v_profitable += person_val
             else:
                 v_all -= 1000 
                 
         v_all += self.goal_reward
-        v = max(v_all, v_profitable)
+        v = max(v_all, v_profitable) if self.is_rl_trap else v_all
         
         self.eval_cache[state] = v
         return v
@@ -280,8 +384,6 @@ class Controller:
     def generate_pruned_actions(self, state):
         elevators, persons, _ = state
         actions = []
-        curr_weights = {eid: w for eid, _, w in elevators}
-
         for eid, e_floor, cur_w in elevators:
             reachable = self.reachable[eid]
             remaining_cap = self.capacities[eid] - cur_w
@@ -289,33 +391,25 @@ class Controller:
             
             for pid, loc in persons:
                 f_goal = self.person_goals[pid]
-                
                 if isinstance(loc, tuple) and loc[0] == 'in' and loc[1] == eid:
                     valid_drops = self.best_dropoffs[eid].get(f_goal, set())
                     interesting_floors.update(d for d in valid_drops if d in reachable)
                     if f_goal in reachable: interesting_floors.add(f_goal)
-                        
                 elif isinstance(loc, tuple) and loc[0] == 'floor':
                     p_loc = loc[1]
-                    if (p_loc, f_goal) in self.helpful_pickups[eid]:
-                        if self.person_weights[pid] <= remaining_cap:
-                            if p_loc in reachable:
-                                interesting_floors.add(p_loc)
+                    if (p_loc, f_goal) in self.helpful_pickups[eid] and self.person_weights[pid] <= remaining_cap and p_loc in reachable:
+                        interesting_floors.add(p_loc)
                                 
             for f in interesting_floors:
                 if f != e_floor: actions.append(f"MOVE{{{eid},{f}}}")
 
             for pid, loc in persons:
                 if isinstance(loc, tuple) and loc[0] == 'floor' and loc[1] == e_floor:
-                    f_goal = self.person_goals[pid]
-                    if (e_floor, f_goal) in self.helpful_pickups[eid]:
-                        if cur_w + self.person_weights[pid] <= self.capacities[eid]:
-                            actions.append(f"ENTER{{{pid},{eid}}}")
-                            
+                    if (e_floor, self.person_goals[pid]) in self.helpful_pickups[eid] and cur_w + self.person_weights[pid] <= self.capacities[eid]:
+                        actions.append(f"ENTER{{{pid},{eid}}}")
                 elif isinstance(loc, tuple) and loc[0] == 'in' and loc[1] == eid:
                     f_goal = self.person_goals[pid]
-                    valid_drops = self.best_dropoffs[eid].get(f_goal, set())
-                    if e_floor in valid_drops or e_floor == f_goal:
+                    if e_floor in self.best_dropoffs[eid].get(f_goal, set()) or e_floor == f_goal:
                         actions.append(f"EXIT{{{pid},{eid}}}")
 
         return actions
