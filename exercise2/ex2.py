@@ -3,14 +3,13 @@ import re
 import heapq
 import time
 
-# ID: 000000000
-# 
-# AI Usage Disclosure:
-# In this assignment, I used Gemini to help model the problem as an MDP.
+id = ["213712276"]
+
+# AI Usage Disclosure: in this assignment, I used Gemini to help model the problem as an MDP.
 # Specifically, the LLM assisted in designing a Hybrid Strategy:
-# 1. A Depth-2 Expectimax lookahead tree with a "Farm vs. Goal" split-heuristic to perfectly handle the _rl traps.
-# 2. An embedded Real-Time A* Search for standard maps that acts deterministically 
-#    but uses exact expected costs (1/P_success) derived from a Dijkstra-based APSP to aggressively complete the level.
+# A Depth-2 Expectimax lookahead tree split-heuristic to handle the rl traps.
+# An embedded Real-Time A* Search for standard maps that acts deterministically 
+# but uses exact expected costs (1/Psuccess) derived from a Dijkstra-based APSP.
 
 class Controller:
     def __init__(self, game: ext_elev.GameAPI):
@@ -36,12 +35,11 @@ class Controller:
             
         self.elevator_probs = {eid: self.game.get_elevator_action_prob(eid) for eid in self.reachable}
 
-        # --- זיהוי אוטומטי של מלכודות RL ---
         max_r = max(self.expected_rewards.values()) if self.expected_rewards else 0
         self.is_rl_trap = max_r > 40
         self.step_penalty = 1.15 if self.is_rl_trap else 1.0
 
-        # 1. Deterministic APSP
+        # Deterministic APSP
         all_floors = set()
         for F in self.reachable.values():
             all_floors.update(F)
@@ -88,7 +86,7 @@ class Controller:
                             self.best_dropoffs[eid][p_goal] = set()
                         self.best_dropoffs[eid][p_goal].update(valid_dropoffs)
 
-        # 2. Stochastic APSP (Dijkstra)
+        # Stochastic APSP (Dijkstra)
         self.sp_cost = {}
         for pid in self.person_goals:
             f_goal = self.person_goals[pid]
@@ -128,21 +126,17 @@ class Controller:
         self.v_initial = self.evaluate_state(self.initial_state)
 
     def choose_next_action(self, state):
-        # מנתב: במלכודות מריץ Expectimax, במפות רגילות מריץ A* מותאם הסתברויות
         if self.is_rl_trap:
             return self.run_expectimax(state)
         else:
             return self.run_astar(state)
 
-    # =========================================================================
-    # HYBRID ENGINE 1: Real-Time A* Search for Normal Maps
-    # =========================================================================
+
     def run_astar(self, start_state):
         start_t = time.time()
         pq = []
         counter = 0
         
-        # מרחיב את הקודקוד הראשון (שורש)
         for a in self.generate_pruned_actions(start_state):
             succ = self.simulate_deterministic(start_state, a)
             cost = self.get_action_expected_cost(a)
@@ -156,13 +150,12 @@ class Controller:
         expansions = 0
         
         while pq:
-            # מגבלת זמן בטוחה מאוד כדי לא לחטוף Timeout (הקצבנו 2 שניות לצעד)
             if expansions > 3000 or time.time() - start_t > 2.0:
                 break
                 
             f, _, g, s, first_a = heapq.heappop(pq)
             
-            if s[2] == 0: # מצאנו את הדרך המהירה ביותר ליעד!
+            if s[2] == 0:
                 return first_a
                 
             if s in visited and visited[s] <= g:
@@ -187,7 +180,6 @@ class Controller:
         return best_action if best_action else "RESET"
 
     def simulate_deterministic(self, state, action_str):
-        """ מריץ את הפעולה בהנחת 100% הצלחה לטובת חיפוש ה-A* """
         elevators_t, persons_t, rem = state
         m = re.fullmatch(r"\s*(MOVE|ENTER|EXIT)\s*\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}\s*", action_str)
         name = m.group(1)
@@ -255,9 +247,7 @@ class Controller:
                 h += best_c
         return h
 
-    # =========================================================================
-    # HYBRID ENGINE 2: Expectimax for RL Traps
-    # =========================================================================
+
     def run_expectimax(self, state):
         self.eval_cache = {} 
         best_action = "RESET"
@@ -412,7 +402,7 @@ class Controller:
                     if e_floor in self.best_dropoffs[eid].get(f_goal, set()) or e_floor == f_goal:
                         actions.append(f"EXIT{{{pid},{eid}}}")
 
-        # fallback אם ה-pruning הוציא רשימה ריקה
+        # if pruning return empty list
         if not actions:
             actions = self.generate_all_legal_actions(state)
         
@@ -433,12 +423,12 @@ class Controller:
         actions = []
         
         for eid, e_floor, cur_w in elevators:
-            # כל מהלכי MOVE חוקיים
+            # applicable MOVE actions
             for f in self.reachable[eid]:
                 if f != e_floor:
                     actions.append(f"MOVE{{{eid},{f}}}")
             
-            # כל פעולות ENTER ו-EXIT חוקיות
+            # applicable ENTER and EXIT moves
             for pid, loc in persons:
                 if isinstance(loc, tuple) and loc[0] == 'floor' and loc[1] == e_floor:
                     if cur_w + self.person_weights[pid] <= self.capacities[eid]:
