@@ -87,8 +87,6 @@ class Controller:
             if not legal_actions:
                 chosen = "RESET"
             else:
-                # עם UCB אנחנו כבר לא צריכים חקירה אקראית נרחבת.
-                # נשאיר אפסילון מינימלי של 1% רק למקרי קצה ולשבירת שוויון נדירה.
                 epsilon = 0.01 
                 
                 if random.random() < epsilon:
@@ -104,7 +102,6 @@ class Controller:
     def _score_action(self, action_str, state):
         elevators, persons, _ = state
         
-        # --- טיפול בפקודת RESET וזיהוי מלכודות ה-RL ---
         if action_str == "RESET":
             alive_pids = {p for p, loc in persons}
             max_r_delivered = 0.0
@@ -131,20 +128,16 @@ class Controller:
         curr_rem = len(persons)
         goal_r = self.game.get_goal_reward()
         
-        # --- UCB: Optimism in the Face of Uncertainty ---
-        # חישוב לוגריתם של הזמן הכולל ליצירת הבונוס
         t = max(1, self.game.get_current_steps())
         ln_t = math.log(t)
         
-        # קבועי UCB - קובעים כמה משקל לתת לסקרנות לעומת ידע קיים
         C_PROB = 0.5 
         C_REW = 5.0
         
-        # פונקציות פנימיות שמחזירות את התוחלת + הבונוס
         def get_p_p(pid):
             base_p = self.person_successes[pid] / self.person_attempts[pid]
             bonus = C_PROB * math.sqrt(ln_t / self.person_attempts[pid])
-            return min(1.0, base_p + bonus) # הסתברות לא תעלה על 100%
+            return min(1.0, base_p + bonus)
 
         def get_p_e(eid):
             base_p = self.elev_successes[eid] / self.elev_attempts[eid]
@@ -180,10 +173,11 @@ class Controller:
             goal_f = self.game.get_person_goal(pid)
             
             p_p = get_p_p(pid)
+            p_e = get_p_e(eid)
             eff_r_p = get_eff_reward(pid)
             
             if (curr_f, goal_f) in self.helpful_pickups[eid]:
-                return p_p * eff_r_p * 100.0
+                return p_p * p_e * eff_r_p * 100.0
             else:
                 return -5000.0 
 
@@ -209,9 +203,21 @@ class Controller:
                 
                 if isinstance(loc, tuple) and loc[0] == 'floor' and loc[1] == target_f:
                     if (target_f, goal_f) in self.helpful_pickups[eid]:
-                        floor_value += eff_r_p * 50.0
+                        w_p = self.game.get_person_weight(pid)
+                        handled = False
+                        for other_eid, other_f, other_w in elevators:
+                            if other_eid != eid and other_f == target_f:
+                                if other_w + w_p <= self.capacities[other_eid]:
+                                    # התיקון הקריטי: האם המעלית האחרת בכלל יכולה לעזור לנוסע הזה?
+                                    if (target_f, goal_f) in self.helpful_pickups[other_eid]:
+                                        handled = True
+                                        break
+                        if not handled:
+                            floor_value += eff_r_p * 50.0
                     
             return (p_e * floor_value) + STEP_PENALTY
+
+        return -5000.0
 
     def _get_legal_actions(self, state):
         """פונקציית עזר ליצירת רשימת כל הפעולות החוקיות במצב הנוכחי"""
