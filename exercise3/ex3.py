@@ -1,6 +1,7 @@
 import ext_elev
 import random
 import re
+import math 
 
 id = ["213712276"]
 
@@ -86,10 +87,9 @@ class Controller:
             if not legal_actions:
                 chosen = "RESET"
             else:
-                current_step = self.game.get_current_steps()
-                
-                # החזרנו את עקומת החקירה המנצחת מההרצה הקודמת
-                epsilon = max(0.01, 0.20 - (current_step / (self.max_steps * 0.5)))
+                # עם UCB אנחנו כבר לא צריכים חקירה אקראית נרחבת.
+                # נשאיר אפסילון מינימלי של 1% רק למקרי קצה ולשבירת שוויון נדירה.
+                epsilon = 0.01 
                 
                 if random.random() < epsilon:
                     chosen = random.choice(legal_actions)
@@ -115,7 +115,6 @@ class Controller:
                     if r_p > max_r_delivered:
                         max_r_delivered = r_p
                         
-            # אם אדם רווחי מאוד (מעל 35) כבר איננו, תעשה ריסט ותחזיר אותו!
             if max_r_delivered >= 35.0:
                 return 100000.0 
             else:
@@ -132,23 +131,42 @@ class Controller:
         curr_rem = len(persons)
         goal_r = self.game.get_goal_reward()
         
-        # --- תגמול אפקטיבי (דחיפות לסיום המפה) ---
+        # --- UCB: Optimism in the Face of Uncertainty ---
+        # חישוב לוגריתם של הזמן הכולל ליצירת הבונוס
+        t = max(1, self.game.get_current_steps())
+        ln_t = math.log(t)
+        
+        # קבועי UCB - קובעים כמה משקל לתת לסקרנות לעומת ידע קיים
+        C_PROB = 0.5 
+        C_REW = 5.0
+        
+        # פונקציות פנימיות שמחזירות את התוחלת + הבונוס
+        def get_p_p(pid):
+            base_p = self.person_successes[pid] / self.person_attempts[pid]
+            bonus = C_PROB * math.sqrt(ln_t / self.person_attempts[pid])
+            return min(1.0, base_p + bonus) # הסתברות לא תעלה על 100%
+
+        def get_p_e(eid):
+            base_p = self.elev_successes[eid] / self.elev_attempts[eid]
+            bonus = C_PROB * math.sqrt(ln_t / self.elev_attempts[eid])
+            return min(1.0, base_p + bonus)
+
         def get_eff_reward(pid):
             base_r = self.person_rewards_sum[pid] / self.person_deliveries[pid]
-            # אם זה האדם האחרון, התגמול שלו שווה גם לבונוס סיום השלב
+            bonus = C_REW * math.sqrt(ln_t / self.person_deliveries[pid])
+            eff_r = base_r + bonus
             if curr_rem == 1:
-                return base_r + goal_r
-            return base_r
+                return eff_r + goal_r
+            return eff_r
 
         if name == "EXIT":
             pid, eid = arg1, arg2
             curr_f = next(f for e, f, w in elevators if e == eid)
             goal_f = self.game.get_person_goal(pid)
             
-            p_p = self.person_successes[pid] / self.person_attempts[pid]
+            p_p = get_p_p(pid)
             eff_r_p = get_eff_reward(pid)
             
-            # תיקון המכפילים למבנה ההיררכי המקורי!
             if curr_f == goal_f:
                 return p_p * eff_r_p * 1000.0 
             elif curr_f in self.best_dropoffs[eid].get(goal_f, set()):
@@ -161,7 +179,7 @@ class Controller:
             curr_f = next(loc[1] for p, loc in persons if p == pid)
             goal_f = self.game.get_person_goal(pid)
             
-            p_p = self.person_successes[pid] / self.person_attempts[pid]
+            p_p = get_p_p(pid)
             eff_r_p = get_eff_reward(pid)
             
             if (curr_f, goal_f) in self.helpful_pickups[eid]:
@@ -171,7 +189,7 @@ class Controller:
 
         elif name == "MOVE":
             eid, target_f = arg1, arg2
-            p_e = self.elev_successes[eid] / self.elev_attempts[eid]
+            p_e = get_p_e(eid)
             
             floor_value = 0.0
             
