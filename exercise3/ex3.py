@@ -11,11 +11,8 @@ class Controller:
             self.reachable = self.game.get_reachable()
             self.capacities = self.game.get_capacities()
             self.max_steps = self.game.get_max_steps()
-            
-            # --- Belief State (Empirical Model) ---
             self.elev_attempts = {eid: 1 for eid in self.reachable}
-            self.elev_successes = {eid: 1 for eid in self.reachable}
-            
+            self.elev_successes = {eid: 1 for eid in self.reachable} 
             self.person_attempts = {}
             self.person_successes = {}
             self.person_rewards_sum = {}
@@ -28,7 +25,7 @@ class Controller:
                 self.person_rewards_sum[pid] = 20.0 
                 self.person_deliveries[pid] = 1
                 
-            # --- Deterministic APSP (Transfer Stations) ---
+            # Deterministic APSP (transfer stations)
             all_floors = set()
             for F in self.reachable.values():
                 all_floors.update(F)
@@ -208,7 +205,7 @@ class Controller:
                         for other_eid, other_f, other_w in elevators:
                             if other_eid != eid and other_f == target_f:
                                 if other_w + w_p <= self.capacities[other_eid]:
-                                    # התיקון הקריטי: האם המעלית האחרת בכלל יכולה לעזור לנוסע הזה?
+                                    # Check if the other elev can help
                                     if (target_f, goal_f) in self.helpful_pickups[other_eid]:
                                         handled = True
                                         break
@@ -219,8 +216,8 @@ class Controller:
 
         return -5000.0
 
+# Helper to get all legal actions from current state
     def _get_legal_actions(self, state):
-        """פונקציית עזר ליצירת רשימת כל הפעולות החוקיות במצב הנוכחי"""
         elevators, persons, _ = state
         actions = ["RESET"]
         
@@ -239,7 +236,6 @@ class Controller:
         return actions
 
     def _update_beliefs(self, current_state):
-        """מפענח את תוצאת הפעולה הקודמת ומעדכן את המודל הסטטיסטי"""
         m = re.fullmatch(r"\s*(MOVE|ENTER|EXIT)\s*\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}\s*", self.last_action)
         if not m:
             return
@@ -273,7 +269,7 @@ class Controller:
                 pass 
             else:
                 self.person_successes[pid] += 1
-                if curr_loc is None: # האדם ירד ביעד ונעלם מהמפה
+                if curr_loc is None:
                     reward_gained = self.game.get_last_gained_reward()
                     if curr_rem == 0 or (last_rem == 1 and curr_rem > 1): 
                         reward_gained -= self.game.get_goal_reward()
