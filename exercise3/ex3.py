@@ -1,0 +1,236 @@
+import ext_elev
+import random
+import re
+
+id = ["213712276"]
+
+class Controller:
+    def __init__(self, game: ext_elev.GameAPI):
+            self.game = game
+            self.reachable = self.game.get_reachable()
+            self.capacities = self.game.get_capacities()
+            self.max_steps = self.game.get_max_steps()
+            
+            # --- Belief State (Empirical Model) ---
+            self.elev_attempts = {eid: 1 for eid in self.reachable}
+            self.elev_successes = {eid: 1 for eid in self.reachable}
+            
+            self.person_attempts = {}
+            self.person_successes = {}
+            self.person_rewards_sum = {}
+            self.person_deliveries = {}
+            
+            _, persons_t, _ = self.game.get_initial_state()
+            for pid, _ in persons_t:
+                self.person_attempts[pid] = 1
+                self.person_successes[pid] = 1
+                self.person_rewards_sum[pid] = 20.0 
+                self.person_deliveries[pid] = 1
+                
+            # --- Deterministic APSP (Transfer Stations) ---
+            all_floors = set()
+            for F in self.reachable.values():
+                all_floors.update(F)
+                
+            edges = {f: set() for f in all_floors}
+            for F in self.reachable.values():
+                for p in F:
+                    for d in F:
+                        if p != d: edges[p].add(d)
+
+            self.min_elevators = {f: {f: 0} for f in all_floors}
+            for start_floor in all_floors:
+                queue = [(start_floor, 0)]
+                visited = {start_floor}
+                while queue:
+                    curr, dist = queue.pop(0)
+                    for nxt in edges.get(curr, []):
+                        if nxt not in visited:
+                            visited.add(nxt)
+                            self.min_elevators[start_floor][nxt] = dist + 1
+                            queue.append((nxt, dist + 1))
+
+            self.helpful_pickups = {eid: set() for eid in self.reachable}
+            self.best_dropoffs = {eid: {} for eid in self.reachable}
+
+            for eid, F in self.reachable.items():
+                for p_loc in all_floors:
+                    for p_goal in all_floors:
+                        if p_loc == p_goal: continue
+                        if p_loc not in F: continue
+                        if p_goal not in self.min_elevators.get(p_loc, {}): continue
+                        
+                        rides_from_start = self.min_elevators[p_loc][p_goal]
+                        valid_dropoffs = set()
+                        for drop_f in F:
+                            if p_goal in self.min_elevators.get(drop_f, {}):
+                                rides_from_drop = self.min_elevators[drop_f][p_goal]
+                                if rides_from_drop < rides_from_start:
+                                    valid_dropoffs.add(drop_f)
+                                    
+                        if valid_dropoffs:
+                            self.helpful_pickups[eid].add((p_loc, p_goal))
+                            if p_goal not in self.best_dropoffs[eid]:
+                                self.best_dropoffs[eid][p_goal] = set()
+                            self.best_dropoffs[eid][p_goal].update(valid_dropoffs)
+
+            self.last_state = None
+            self.last_action = None
+
+    def choose_next_action(self, state):
+        # 1. שלב הלמידה: עדכון הסטטיסטיקות לפי תוצאת הפעולה הקודמת
+        if self.last_action is not None and self.last_action != "RESET":
+            self._update_beliefs(state)
+
+        legal_actions = self._get_legal_actions(state)
+        
+        if not legal_actions:
+            chosen = "RESET"
+        else:
+            # 2. אסטרטגיית Epsilon-Greedy עם דעיכה
+            current_step = self.game.get_current_steps()
+            # מתחילים מחקירה גבוהה (50%) ודועכים עד מינימום של 5%
+            epsilon = max(0.05, 0.50 - (current_step / self.max_steps))
+            
+            if random.random() < epsilon:
+                # Explore: חקירה אקראית
+                chosen = random.choice(legal_actions)
+            else:
+                # Exploit: בחירת הפעולה בעלת התוחלת הגבוהה ביותר
+                chosen = max(legal_actions, key=lambda a: self._score_action(a, state))
+                
+        # 3. שמירת הזיכרון לצעד הבא
+        self.last_state = state
+        self.last_action = chosen
+        
+        return chosen
+
+    def _get_legal_actions(self, state):
+        """פונקציית עזר ליצירת רשימת כל הפעולות החוקיות במצב הנוכחי"""
+        elevators, persons, _ = state
+        actions = ["RESET"]
+        
+        for eid, e_floor, cur_w in elevators:
+            for f in self.reachable[eid]:
+                if f != e_floor:
+                    actions.append(f"MOVE{{{eid},{f}}}")
+            
+            for pid, loc in persons:
+                if isinstance(loc, tuple) and loc[0] == 'floor' and loc[1] == e_floor:
+                    if cur_w + self.game.get_person_weight(pid) <= self.capacities[eid]:
+                        actions.append(f"ENTER{{{pid},{eid}}}")
+                elif isinstance(loc, tuple) and loc[0] == 'in' and loc[1] == eid:
+                    actions.append(f"EXIT{{{pid},{eid}}}")
+                    
+        return actions
+
+    def _update_beliefs(self, current_state):
+        """מפענח את תוצאת הפעולה הקודמת ומעדכן את המודל הסטטיסטי"""
+        m = re.fullmatch(r"\s*(MOVE|ENTER|EXIT)\s*\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}\s*", self.last_action)
+        if not m:
+            return
+            
+        action_type = m.group(1)
+        arg1, arg2 = int(m.group(2)), int(m.group(3))
+        
+        last_elevs, last_persons, last_rem = self.last_state
+        curr_elevs, curr_persons, curr_rem = current_state
+        
+        if action_type == "MOVE":
+            eid, target_f = arg1, arg2
+            self.elev_attempts[eid] += 1
+            curr_f = next(f for e, f, w in curr_elevs if e == eid)
+            if curr_f == target_f:
+                self.elev_successes[eid] += 1
+                
+        elif action_type == "ENTER":
+            pid, eid = arg1, arg2
+            self.person_attempts[pid] += 1
+            curr_loc = next((loc for p, loc in curr_persons if p == pid), None)
+            if isinstance(curr_loc, tuple) and curr_loc[0] == 'in' and curr_loc[1] == eid:
+                self.person_successes[pid] += 1
+                
+        elif action_type == "EXIT":
+            pid, eid = arg1, arg2
+            self.person_attempts[pid] += 1
+            curr_loc = next((loc for p, loc in curr_persons if p == pid), None)
+            
+            if isinstance(curr_loc, tuple) and curr_loc[0] == 'in' and curr_loc[1] == eid:
+                pass 
+            else:
+                self.person_successes[pid] += 1
+                if curr_loc is None: # האדם ירד ביעד ונעלם מהמפה
+                    reward_gained = self.game.get_last_gained_reward()
+                    if curr_rem == 0 or (last_rem == 1 and curr_rem > 1): 
+                        reward_gained -= self.game.get_goal_reward()
+                    self.person_rewards_sum[pid] += reward_gained
+                    self.person_deliveries[pid] += 1
+
+    def _score_action(self, action_str, state):
+            elevators, persons, _ = state
+            
+            m = re.fullmatch(r"\s*(MOVE|ENTER|EXIT)\s*\{\s*(-?\d+)\s*,\s*(-?\d+)\s*\}\s*", action_str)
+            if not m:
+                return -1000.0
+
+            name = m.group(1)
+            arg1, arg2 = int(m.group(2)), int(m.group(3))
+            
+            score = 0.0
+
+            if name == "EXIT":
+                pid, eid = arg1, arg2
+                curr_f = next(f for e, f, w in elevators if e == eid)
+                goal_f = self.game.get_person_goal(pid)
+                
+                p_p = self.person_successes[pid] / self.person_attempts[pid]
+                r_p = self.person_rewards_sum[pid] / self.person_deliveries[pid]
+                
+                if curr_f == goal_f:
+                    score = p_p * r_p * 1000.0 
+                elif curr_f in self.best_dropoffs[eid].get(goal_f, set()):
+                    # האדם יורד בתחנת מעבר שמקרבת אותו ליעד
+                    score = p_p * r_p * 300.0 
+                else:
+                    score = -1000.0 
+
+            elif name == "ENTER":
+                pid, eid = arg1, arg2
+                curr_f = next(loc[1] for p, loc in persons if p == pid)
+                goal_f = self.game.get_person_goal(pid)
+                
+                p_p = self.person_successes[pid] / self.person_attempts[pid]
+                r_p = self.person_rewards_sum[pid] / self.person_deliveries[pid]
+                
+                # בדיקה האם העלאת האדם מקדמת אותו במסלול
+                if (curr_f, goal_f) in self.helpful_pickups[eid]:
+                    score = p_p * r_p * 100.0
+                else:
+                    score = -1000.0 
+
+            elif name == "MOVE":
+                eid, target_f = arg1, arg2
+                p_e = self.elev_successes[eid] / self.elev_attempts[eid]
+                
+                floor_value = 0.0
+                
+                for pid, loc in persons:
+                    goal_f = self.game.get_person_goal(pid)
+                    if isinstance(loc, tuple) and loc[0] == 'in' and loc[1] == eid:
+                        if target_f == goal_f:
+                            r_p = self.person_rewards_sum[pid] / self.person_deliveries[pid]
+                            floor_value += r_p * 500.0
+                        elif target_f in self.best_dropoffs[eid].get(goal_f, set()):
+                            r_p = self.person_rewards_sum[pid] / self.person_deliveries[pid]
+                            floor_value += r_p * 200.0
+                            
+                for pid, loc in persons:
+                    goal_f = self.game.get_person_goal(pid)
+                    if isinstance(loc, tuple) and loc[0] == 'floor' and loc[1] == target_f:
+                        if (target_f, goal_f) in self.helpful_pickups[eid]:
+                            r_p = self.person_rewards_sum[pid] / self.person_deliveries[pid]
+                            floor_value += r_p * 50.0
+                        
+                score = p_e * floor_value
+
+            return score
